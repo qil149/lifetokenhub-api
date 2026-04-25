@@ -1,6 +1,3 @@
 name = "lifetokenhub-api"
 main = "lifetokenhub-api.js"
 compatibility_date = "2025-01-01"
-
-[env.production]
-vars = { ENVIRONMENT = "production" }
