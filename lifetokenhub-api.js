@@ -3,13 +3,15 @@
 // 支持：API转发 + 双供应商路由 + 生命基金记录 + 用户认证 + 用量计费
 
 // === 双供应商配置 ===
+// DeepSeek V4 系列（主力）+ 华为 Ascend 计算池（备用）
 const API_PROVIDERS = {
   deepseek: {
     baseUrl: 'https://api.deepseek.com',
-    models: ['deepseek-chat', 'deepseek-coder', 'deepseek-v2.5'],
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     providerGroup: 'primary',
     label: 'Primary Provider',
-    pricing: { input: 0.0005, output: 0.002 }
+    // 上游成本（USD/1K tokens，用于公式计算基价，实际以覆盖值为准）
+    pricing: { input: 0.000139, output: 0.000278 }
   },
   ascend: {
     baseUrl: 'https://ap-southeast-1.api.huaweicloud.com/v1/infers/cognitive-brain-compatible',
@@ -22,6 +24,7 @@ const API_PROVIDERS = {
 
 const USER_PRICE_MULTIPLIER = 1.3333
 
+// 自动计算默认定价
 const USER_PRICING = {}
 for (const [k, p] of Object.entries(API_PROVIDERS)) {
   for (const modelId of p.models) {
@@ -31,10 +34,15 @@ for (const [k, p] of Object.entries(API_PROVIDERS)) {
     }
   }
 }
-// 覆盖特殊定价的模型
-USER_PRICING['deepseek-coder'] = { input: 0.001067, output: 0.004978 }
-USER_PRICING['deepseek-v2.5'] = { input: 0.000889, output: 0.004267 }
+// V4 系列定价（零售价，已含 1.3333 加价，USD/1K）
+// DeepSeek V4-Flash：官方 1元/M 输入，2元/M 输出 → 零售 1.33元/2.67元 → ~0.185/0.371 USD/M
+// DeepSeek V4-Pro：官方 12元/M 输入，24元/M 输出 → 零售 16元/32元 → ~2.22/4.44 USD/M
+USER_PRICING['deepseek-v4-flash'] = { input: 0.000185, output: 0.000371 }
+USER_PRICING['deepseek-v4-pro'] = { input: 0.00222, output: 0.00444 }
 USER_PRICING['huawei-pangu-lite'] = { input: 0.000356, output: 0.001778 }
+// 缓存命中折扣价（按 V4-Flash 官方缓存价 0.2元/M → 零售 0.27元/M → 0.0375 USD/M）
+USER_PRICING['deepseek-v4-flash-cache'] = { input: 0.0000375, output: 0.000371 }
+USER_PRICING['deepseek-v4-pro-cache'] = { input: 0.000185, output: 0.00444 }
 
 // === 主入口 (ES Module) ===
 export default {
@@ -90,7 +98,7 @@ async function handleChatCompletion(request, env, corsHeaders) {
     const authResult = await authenticateUser(request)
     if (!authResult.valid) return errorResponse(401, authResult.error || 'Authentication failed', corsHeaders)
 
-    const model = requestData.model || 'deepseek-chat'
+    const model = requestData.model || 'deepseek-v4-flash'
     const providerInfo = getProviderByModel(model)
     if (!providerInfo) return errorResponse(400, `Model "${model}" not available`, corsHeaders)
     const { provider, endpoint } = providerInfo
@@ -155,7 +163,7 @@ async function tryAscendFallback(requestData, env) {
     })
     if (!res.ok) return null
     const body = await res.json()
-    return { ...body, _fallback: { fromProvider: 'deepseek', toProvider: 'ascend', fromModel: requestData.model || 'deepseek-chat', toModel: 'huawei-pangu' } }
+    return { ...body, _fallback: { fromProvider: 'deepseek', toProvider: 'ascend', fromModel: requestData.model || 'deepseek-v4-flash', toModel: 'huawei-pangu' } }
   } catch (e) { return null }
 }
 
