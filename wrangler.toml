@@ -1,3 +1,39 @@
 name = "lifetokenhub-api"
-main = "lifetokenhub-api.js"
-compatibility_date = "2025-01-01"
+main = "src/worker.js"
+compatibility_date = "2026-04-01"
+
+# ============================================================
+#  Cloudflare Worker 配置 - LifeTokenHub API 网关
+#  部署: npm run deploy
+# ============================================================
+
+# --- KV 命名空间（部署前需创建） ---
+# 创建命令:
+#   npx wrangler kv:namespace create "API_KEYS"
+#   npx wrangler kv:namespace create "TRANSACTIONS"
+# 创建后复制生成的 ID 替换下方占位符
+
+[[kv_namespaces]]
+binding = "API_KEYS"
+id = "YOUR_API_KEYS_KV_ID"
+
+[[kv_namespaces]]
+binding = "TRANSACTIONS"
+id = "YOUR_TRANSACTIONS_KV_ID"
+
+# --- 环境变量（部署前用 wrangler secret put 设置） ---
+#  npx wrangler secret put PADDLE_WEBHOOK_SECRET
+#  npx wrangler secret put UPSTREAM_API_KEY
+#  npx wrangler secret put ADMIN_API_KEY
+#  npx wrangler secret put JWT_SECRET
+
+[vars]
+UPSTREAM_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-chat"
+WORKER_NAME = "lifetokenhub-api"
+ENVIRONMENT = "production"
+
+# --- 路由 ---
+routes = [
+  { pattern = "api.lifetokenhub.com/*", zone_name = "lifetokenhub.com" }
+]

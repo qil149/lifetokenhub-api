@@ -1,0 +1,16 @@
+{
+  "name": "lifetokenhub-api",
+  "version": "1.0.0",
+  "description": "LifeTokenHub API Gateway — Cloudflare Worker",
+  "main": "src/worker.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev --local",
+    "lint": "node --check src/worker.js",
+    "secrets": "echo 'Run: wrangler secret put <NAME>'"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
