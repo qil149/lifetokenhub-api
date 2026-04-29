@@ -68,6 +68,29 @@ USER_PRICING['deepseek-reasoner'] = { input: 0.000741, output: 0.002967 };
 USER_PRICING['huawei-pangu'] = { input: 0.000356, output: 0.001778 };
 USER_PRICING['huawei-pangu-lite'] = { input: 0.000356, output: 0.001778 };
 
+// Sensitive content filter — protects upstream API keys from being banned
+const BLOCKED_PATTERNS = [
+  // Level 1: CSAM / child exploitation (absolute must-block)
+  /child.*sexual|未成年.*(?:色情|性)|儿童.*(?:色情|性)|csam|cocsa/i,
+  // Level 2: Illegal activities that could get API key banned
+  /制作.*(?:毒品|炸弹|炸药)|(?:毒品|炸弹|炸药).*制作|制毒|黑客.*攻击|攻击.*服务器|钓鱼.*网站/i,
+  // Level 3: Self-harm
+  /自杀.*(?:方法|教程|步骤|方式)|怎么.*自杀|如何.*自杀|自残.*方法/i,
+];
+
+function checkSensitiveContent(messages) {
+  if (!messages || !Array.isArray(messages)) return null;
+  for (const msg of messages) {
+    if (!msg.content || typeof msg.content !== "string") continue;
+    for (const pattern of BLOCKED_PATTERNS) {
+      if (pattern.test(msg.content)) {
+        return { blocked: true, reason: "Request blocked: content violates usage policy" };
+      }
+    }
+  }
+  return null;
+}
+
 // ============================================================
 // 路由表
 // ============================================================
@@ -430,6 +453,14 @@ async function handleChatCompletion(request, env) {
   if (keyData.status !== 'active') return jsonError(403, `API key is ${keyData.status}`, request);
   if (keyData.balance <= 0 && keyData.quota <= 0) {
     return jsonError(402, 'Insufficient balance. Top up at https://lifetokenhub.com', request);
+  }
+
+  // Check sensitive content before forwarding to upstream
+  const blockResult = checkSensitiveContent(requestData?.messages);
+  if (blockResult) {
+    return new Response(JSON.stringify({
+      error: { message: blockResult.reason, type: "content_policy_violation", code: "400" }
+    }), { status: 400, headers: { "Content-Type": "application/json", ...buildCorsHeaders(request) } });
   }
 
   // 确定模型和供应商
