@@ -3,37 +3,23 @@ main = "src/worker.js"
 compatibility_date = "2026-04-01"
 
 # ============================================================
-#  Cloudflare Worker 配置 - LifeTokenHub API 网关
-#  部署: npm run deploy
+#  LifeTokenHub API Gateway - Cloudflare Worker 配置
+#  部署方式（选一）：
+#    A. npm run deploy  — 需要 wrangler 认证
+#    B. 粘贴到 Dashboard  — 最快，无需 CLI
 # ============================================================
 
-# --- KV 命名空间（部署前需创建） ---
+# --- 环境变量（Dashboard → Settings → Variables 设置，或 wrangler secret） ---
+#   DEEPSEEK_API_KEY  — 必填，DeepSeek API Key（要有余额）
+#   ASCEND_API_KEY    — 可选，华为 Ascend API Key
+#   ADMIN_API_KEY     — 可选，后台管理 Key
+#   ALLOWED_ORIGIN    — 可选，CORS 允许的域名，默认 *
+
+# --- KV 命名空间（可选，不配也能工作但不记账） ---
+# 如需记作用量，创建 KV 并绑定到 LIFETOKEN_KV
 # 创建命令:
-#   npx wrangler kv:namespace create "API_KEYS"
-#   npx wrangler kv:namespace create "TRANSACTIONS"
-# 创建后复制生成的 ID 替换下方占位符
-
-[[kv_namespaces]]
-binding = "API_KEYS"
-id = "YOUR_API_KEYS_KV_ID"
-
-[[kv_namespaces]]
-binding = "TRANSACTIONS"
-id = "YOUR_TRANSACTIONS_KV_ID"
-
-# --- 环境变量（部署前用 wrangler secret put 设置） ---
-#  npx wrangler secret put PADDLE_WEBHOOK_SECRET
-#  npx wrangler secret put UPSTREAM_API_KEY
-#  npx wrangler secret put ADMIN_API_KEY
-#  npx wrangler secret put JWT_SECRET
-
-[vars]
-UPSTREAM_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
-WORKER_NAME = "lifetokenhub-api"
-ENVIRONMENT = "production"
-
-# --- 路由 ---
-routes = [
-  { pattern = "api.lifetokenhub.com/*", zone_name = "lifetokenhub.com" }
-]
+#   npx wrangler kv:namespace create "LIFETOKEN_KV"
+# 粘贴返回的 ID 到下方:
+# [[kv_namespaces]]
+# binding = "LIFETOKEN_KV"
+# id = "your-kv-id-here"
