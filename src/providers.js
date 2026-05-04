@@ -13,7 +13,7 @@ export const API_PROVIDERS = {
     pricing: { input: 0.000139, output: 0.000278 }
   },
   ascend: {
-    baseUrl: 'https://ap-southeast-1.api.huaweicloud.com/v1/infers/cognitive-brain-compatible',
+    baseUrl: 'https://ap-southeast-1.api.huaweicloud.com',
     models: ['huawei-pangu', 'huawei-pangu-lite'],
     providerGroup: 'ascend',
     label: 'Ascend Compute Provider',

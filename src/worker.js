@@ -90,7 +90,7 @@ async function handleChatCompletion(request, env, corsHeaders) {
       }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    const usageCheck = await checkUsageLimits(authResult.userId, model, env)
+    const usageCheck = await checkUsageLimits(authResult.userId, model, env, requestData.max_tokens)
     if (!usageCheck.allowed) return errorResponse(402, usageCheck.reason || 'Insufficient balance', corsHeaders)
 
     const dailyCheck = await checkDailyUsage(authResult.userId, env)
@@ -107,7 +107,8 @@ async function handleChatCompletion(request, env, corsHeaders) {
       stream: endpoint === 'deepseek' ? (requestData.stream || false) : false
     }
 
-    const upstreamResponse = await fetch(provider.baseUrl + '/v1/chat/completions', {
+    const upstreamPath = endpoint === 'ascend' ? '/v1/infers/cognitive-brain-compatible/chat/completions' : '/v1/chat/completions'
+    const upstreamResponse = await fetch(provider.baseUrl + upstreamPath, {
       method: 'POST',
       headers: buildUpstreamHeaders(endpoint, apiKey),
       body: JSON.stringify(upstreamBody)
@@ -164,7 +165,7 @@ async function tryAscendFallback(requestData, env) {
   try {
     const key = env.ASCEND_API_KEY
     if (!key) return null
-    const res = await fetch(API_PROVIDERS.ascend.baseUrl + '/v1/chat/completions', {
+    const res = await fetch(API_PROVIDERS.ascend.baseUrl + '/v1/infers/cognitive-brain-compatible/chat/completions', {
       method: 'POST',
       headers: buildUpstreamHeaders('ascend', key),
       body: JSON.stringify({
@@ -303,7 +304,8 @@ async function handleLogin(request, env, corsHeaders) {
   const hash = await pbkdf2Hash(password, userData.salt)
   if (hash !== userData.passwordHash) return errorResponse(401, 'Invalid email or password', corsHeaders)
 
-  return new Response(JSON.stringify({ success: true, userId: userData.userId, apiKey: userData.apiKey, balance: 0 }), {
+  const balance = await getBalance(userData.userId, env)
+  return new Response(JSON.stringify({ success: true, userId: userData.userId, apiKey: userData.apiKey, balance }), {
     status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   })
 }
@@ -338,13 +340,14 @@ async function authenticateUser(request, env) {
   }
 }
 
-async function checkUsageLimits(userId, model, env) {
+async function checkUsageLimits(userId, model, env, maxTokens = 4096) {
   const kv = env?.LIFETOKEN_KV
   if (!kv) return { allowed: false, reason: 'KV storage not configured' }
   const balance = await getBalance(userId, env)
   const pricing = USER_PRICING[model]
   if (!pricing) return { allowed: false, reason: `Unknown model: ${model}` }
-  const minCost = (100 / 1000000) * pricing.input + (100 / 1000000) * pricing.output
+  const estimatedTokens = Math.max(1000, maxTokens || 4096)
+  const minCost = (estimatedTokens / 1000000) * pricing.input + (estimatedTokens / 1000000) * pricing.output
   if (balance < minCost) {
     return { allowed: false, reason: `余额不足，需要至少 ¥${minCost.toFixed(4)}，当前余额 ¥${balance.toFixed(2)}` }
   }
@@ -468,7 +471,7 @@ async function handlePaddleWebhook(request, env, corsHeaders) {
     const parts = {}
     for (const p of signatureHeader.split(';')) {
       const eqIdx = p.indexOf('=')
-      if (eqIdx > 0) parts[p.slice(0, eqIdx)] = p.slice(eqIdx + 1)
+      if (eqIdx > 0) parts[p.slice(0, eqIdx).trim()] = p.slice(eqIdx + 1).trim()
     }
     if (!parts.ts || !parts.h1) {
       return errorResponse(401, 'Invalid Paddle-Signature format', corsHeaders)

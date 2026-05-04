@@ -2,6 +2,11 @@ name = "lifetokenhub-api"
 main = "src/worker.js"
 compatibility_date = "2026-04-01"
 
+# --- 路由绑定 ---
+routes = [
+  { pattern = "api.lifetokenhub.com/*", zone_name = "lifetokenhub.com" }
+]
+
 # ============================================================
 #  LifeTokenHub API Gateway - Cloudflare Worker 配置
 #  部署方式（选一）：
