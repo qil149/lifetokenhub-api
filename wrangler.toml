@@ -22,11 +22,7 @@ routes = [
 #                         在 Paddle 后台 → Developer Tools → Notifications 获取
 #   ALLOWED_ORIGIN       — 可选，CORS 允许的域名，默认 *
 
-# --- KV 命名空间（可选，不配也能工作但不记账） ---
-# 如需记作用量，创建 KV 并绑定到 LIFETOKEN_KV
-# 创建命令:
-#   npx wrangler kv:namespace create "LIFETOKEN_KV"
-# 粘贴返回的 ID 到下方:
-# [[kv_namespaces]]
-# binding = "LIFETOKEN_KV"
-# id = "your-kv-id-here"
+# --- KV 命名空间（用户数据/余额/用量存储） ---
+[[kv_namespaces]]
+binding = "LIFETOKEN_KV"
+id = "d6d36f596d6a41cc8fd26465d6f677f9"

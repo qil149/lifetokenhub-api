@@ -20,7 +20,7 @@ export default {
     const path = url.pathname
     const origin = request.headers.get('Origin') || ''
 
-    const allowedOrigin = env.ALLOWED_ORIGIN === '*' ? '*' : (origin === env.ALLOWED_ORIGIN ? origin : '')
+    const allowedOrigin = (!env.ALLOWED_ORIGIN || env.ALLOWED_ORIGIN === '*') ? '*' : (origin === env.ALLOWED_ORIGIN ? origin : '')
     const corsHeaders = {
       'Access-Control-Allow-Origin': allowedOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
