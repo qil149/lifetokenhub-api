@@ -10,84 +10,8 @@
 //   ALLOWED_ORIGIN    — 可选，CORS 允许的域名，默认 *
 // 注意：无需 KV 也能工作，但不记账。想记作用量需创建 KV namespace 并绑定到 LIFETOKEN_KV
 
-// === 双供应商配置 ===
-// DeepSeek V4 系列（主力）+ 华为 Ascend 计算池（备用）
-const API_PROVIDERS = {
-  deepseek: {
-    baseUrl: 'https://api.deepseek.com',
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
-    providerGroup: 'primary',
-    label: 'Primary Provider',
-    // 上游成本（USD/1K tokens，用于公式计算基价，实际以覆盖值为准）
-    pricing: { input: 0.000139, output: 0.000278 }
-  },
-  ascend: {
-    baseUrl: 'https://ap-southeast-1.api.huaweicloud.com/v1/infers/cognitive-brain-compatible',
-    models: ['huawei-pangu', 'huawei-pangu-lite'],
-    providerGroup: 'ascend',
-    label: 'Ascend Compute Provider',
-    pricing: { input: 0.0004, output: 0.0015 }
-  }
-}
-
-// === 零售定价（CNY/百万 tokens）===
-// 输入价分正常和缓存两种，输出价不变
-// 缓存价仅对 DeepSeek 供应商有效（其他上游无缓存机制）
-const USER_PRICING = {
-  'deepseek-v4-flash': { input: 1.33, output: 2.67, input_cache: 0.13 },
-  'deepseek-v4-pro': { input: 16, output: 32, input_cache: 1.33 },
-  'huawei-pangu': { input: 5.33, output: 21.33 },
-  'huawei-pangu-lite': { input: 5.33, output: 21.33 },
-  // 缓存命中折扣模型（保留兼容，但推荐使用自动缓存计价）
-  'deepseek-v4-flash-cache': { input: 0.13, output: 2.67 },
-  'deepseek-v4-pro-cache': { input: 1.33, output: 32 }
-}
-
-// === 实时汇率（er-api.com，内存缓存 1 小时）===
-// 返回 { usdToCny, usdToEur, source, updatedAt }
-let _exchangeRateCache = null
-let _exchangeRateCacheTime = 0
-
-async function getExchangeRate() {
-  const now = Date.now()
-  if (_exchangeRateCache && (now - _exchangeRateCacheTime) < 3600000) return _exchangeRateCache
-  try {
-    const res = await fetch('https://open.er-api.com/v6/latest/USD')
-    const data = await res.json()
-    _exchangeRateCache = {
-      cny: data.rates?.CNY || 7.2,
-      eur: data.rates?.EUR || 0.92,
-      _raw: data
-    }
-    _exchangeRateCacheTime = now
-    return _exchangeRateCache
-  } catch (e) {
-    return _exchangeRateCache || { cny: 7.2, eur: 0.92 }
-  }
-}
-
-// === 敏感内容过滤（防止上游 API Key 被封）===
-const BLOCKED_PATTERNS = [
-  // Level 1: CSAM / child exploitation (absolute must-block)
-  /child.*sexual|未成年.*(?:色情|性)|儿童.*(?:色情|性)|csam|cocsa/i,
-  // Level 2: Illegal activities that could get API key banned
-  /制作.*(?:毒品|炸弹|炸药)|(?:毒品|炸弹|炸药).*制作|制毒|黑客.*攻击|攻击.*服务器|钓鱼.*网站/i,
-  // Level 3: Self-harm
-  /自杀.*(?:方法|教程|步骤|方式)|怎么.*自杀|如何.*自杀|自残.*方法/i,
-]
-
-function checkSensitiveContent(messages) {
-  if (!messages || !Array.isArray(messages)) return null
-  for (const msg of messages) {
-    if (!msg.content || typeof msg.content !== 'string') continue
-    for (const pattern of BLOCKED_PATTERNS) {
-      if (pattern.test(msg.content)) {
-        return { blocked: true, reason: 'Request blocked: content violates usage policy' }
-      }
-    }
-  }
-  return null
-}
+import { API_PROVIDERS, USER_PRICING, checkSensitiveContent, getExchangeRate, calculateUserCost } from './providers.js'
+import { errorResponse, estimateTokens, generateRequestId, extractUserIdFromKey } from './utils.js'
 
 // === 主入口 (ES Module) ===
 export default {
@@ -132,6 +56,8 @@ export default {
         return await handleRegister(request, env, corsHeaders)
       case path === '/v1/auth/login' && request.method === 'POST':
         return await handleLogin(request, env, corsHeaders)
+      case path === '/webhook/paddle' && request.method === 'POST':
+        return await handlePaddleWebhook(request, env, corsHeaders)
       default:
         return new Response(JSON.stringify({
           error: 'Not found',
@@ -148,7 +74,7 @@ async function handleChatCompletion(request, env, corsHeaders) {
     let requestData
     try { requestData = await request.json() } catch (e) { return errorResponse(400, 'Invalid JSON body', corsHeaders) }
 
-    const authResult = await authenticateUser(request)
+    const authResult = await authenticateUser(request, env)
     if (!authResult.valid) return errorResponse(401, authResult.error || 'Authentication failed', corsHeaders)
 
     const model = requestData.model || 'deepseek-v4-flash'
@@ -166,6 +92,9 @@ async function handleChatCompletion(request, env, corsHeaders) {
 
     const usageCheck = await checkUsageLimits(authResult.userId, model, env)
     if (!usageCheck.allowed) return errorResponse(402, usageCheck.reason || 'Insufficient balance', corsHeaders)
+
+    const dailyCheck = await checkDailyUsage(authResult.userId, env)
+    if (!dailyCheck.allowed) return errorResponse(429, dailyCheck.reason || 'Daily limit exceeded', corsHeaders)
 
     const apiKey = endpoint === 'ascend' ? env.ASCEND_API_KEY : env.DEEPSEEK_API_KEY
     if (!apiKey) return errorResponse(500, `API key not configured for ${endpoint}`, corsHeaders)
@@ -290,7 +219,7 @@ async function handleAuthVerify(request, corsHeaders) {
 }
 
 async function handleBalance(request, env, corsHeaders) {
-  const authResult = await authenticateUser(request)
+  const authResult = await authenticateUser(request, env)
   if (!authResult.valid) return errorResponse(401, authResult.error || 'Authentication failed', corsHeaders)
   const userId = authResult.userId
   const [balance, rate] = await Promise.all([getBalance(userId, env), getExchangeRate()])
@@ -304,7 +233,7 @@ async function handleBalance(request, env, corsHeaders) {
     balance_usd_display: '$' + (balance / rateCNY).toFixed(2),
     balance_eur: parseFloat((balance / rateCNY * rateEUR).toFixed(4)),
     balance_eur_display: '€' + (balance / rateCNY * rateEUR).toFixed(2),
-    exchange_rate: { usdToCny: rateCNY, usdToEur: rateEUR, source: 'er-api.com', updatedAt: new Date(_exchangeRateCacheTime).toISOString() }
+    exchange_rate: { usdToCny: rateCNY, usdToEur: rateEUR, source: 'er-api.com', updatedAt: rate.updatedAt || new Date(0).toISOString() }
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
 }
 
@@ -324,7 +253,7 @@ async function handleAdminCredits(request, env, corsHeaders) {
   await kv.put(key, newBalance.toFixed(6))
   return new Response(JSON.stringify({
     userId, previousBalance, addedAmount: amount, newBalance, currency: 'CNY'
-  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }))
+  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
 }
 
 // === 注册 ===
@@ -342,10 +271,10 @@ async function handleRegister(request, env, corsHeaders) {
   const existing = await kv.get(userKey)
   if (existing) return errorResponse(409, 'Email already registered', corsHeaders)
 
-  const userId = 'u_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)
-  const salt = btoa(crypto.getRandomValues(new Uint8Array(16)).join(','))
+  const userId = 'u_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
+  const salt = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2, '0')).join('')
   const passwordHash = await pbkdf2Hash(password, salt)
-  const apiKey = 'ltk_v1_' + btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16)))).replace(/=/g, '')
+  const apiKey = 'ltk_v1_' + btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 
   const userData = { userId, email: email.toLowerCase(), passwordHash, salt, apiKey, createdAt: new Date().toISOString() }
   await kv.put(userKey, JSON.stringify(userData))
@@ -390,21 +319,28 @@ async function pbkdf2Hash(password, salt) {
   return btoa(String.fromCharCode(...new Uint8Array(hash)))
 }
 
-async function authenticateUser(request) {
+async function authenticateUser(request, env) {
   const h = request.headers.get('Authorization')
   if (!h || !h.startsWith('Bearer ')) return { valid: false, error: 'Missing Authorization header' }
   const key = h.replace('Bearer ', '').trim()
   if (!key.startsWith('ltk_') || key.length < 20) return { valid: false, error: 'Invalid API key' }
-  return { valid: true, userId: extractUserIdFromKey(key), apiKey: key, lifeFundEnabled: true, providerGroups: ['primary', 'ascend'] }
-}
 
-function extractUserIdFromKey(apiKey) {
-  const p = apiKey.split('_'); return p.length >= 3 ? p[2] : 'anonymous'
+  const kv = env?.LIFETOKEN_KV
+  if (!kv) return { valid: false, error: 'Service unavailable: KV storage not configured' }
+
+  try {
+    const raw = await kv.get(`api_key:${key}`)
+    if (!raw) return { valid: false, error: 'Invalid API key' }
+    const keyData = JSON.parse(raw)
+    return { valid: true, userId: keyData.userId, apiKey: key, lifeFundEnabled: true, providerGroups: ['primary', 'ascend'] }
+  } catch (e) {
+    return { valid: false, error: 'Service unavailable: KV storage error' }
+  }
 }
 
 async function checkUsageLimits(userId, model, env) {
-  const kv = env.LIFETOKEN_KV
-  if (!kv) return { allowed: true, balance: 0 }
+  const kv = env?.LIFETOKEN_KV
+  if (!kv) return { allowed: false, reason: 'KV storage not configured' }
   const balance = await getBalance(userId, env)
   const pricing = USER_PRICING[model]
   if (!pricing) return { allowed: false, reason: `Unknown model: ${model}` }
@@ -432,17 +368,20 @@ async function checkDailyUsage(userId, env) {
 }
 
 async function deductBalance(userId, costCNY, env) {
-  const kv = env.LIFETOKEN_KV
+  const kv = env?.LIFETOKEN_KV
   if (!kv || costCNY <= 0) return 0
   const key = `balance:${userId}`
-  let balance = 0
   try {
     const raw = await kv.get(key)
-    balance = raw ? parseFloat(raw) : 0
-    const newBalance = Math.max(0, parseFloat((balance - costCNY).toFixed(6)))
+    const balance = raw ? parseFloat(raw) : 0
+    if (costCNY > balance) {
+      await kv.put(key, '0')
+      return 0
+    }
+    const newBalance = parseFloat((balance - costCNY).toFixed(6))
     await kv.put(key, newBalance.toFixed(6))
     return newBalance
-  } catch (e) { return balance }
+  } catch (e) { return 0 }
 }
 
 async function recordUsage(userId, tokens, env) {
@@ -510,27 +449,191 @@ function buildSuccessResponse(data, providerInfo, authResult, responseTime, cors
   })
 }
 
-function estimateTokens(text) {
-  if (typeof text === 'string') return Math.ceil(text.length / 4)
-  if (Array.isArray(text)) return text.reduce((s, m) => s + estimateTokens(m.content || ''), 0)
-  return 0
-}
+// ================================================================
+//  Paddle Webhook 处理
+// ================================================================
 
-function calculateUserCost(inputTokens, outputTokens, pricing, cacheHitTokens) {
-  if (cacheHitTokens && pricing.input_cache) {
-    const cacheMiss = Math.max(0, inputTokens - cacheHitTokens)
-    const cost = (cacheMiss / 1000000) * pricing.input + (cacheHitTokens / 1000000) * pricing.input_cache + (outputTokens / 1000000) * pricing.output
-    return parseFloat(cost.toFixed(4))
+async function handlePaddleWebhook(request, env, corsHeaders) {
+  try {
+    // 1. 获取原始 body（签名验证需要原始字符串）
+    const rawBody = await request.text()
+
+    // 2. 验证 Paddle-Signature
+    const signatureHeader = request.headers.get('Paddle-Signature')
+    if (!signatureHeader) {
+      return errorResponse(401, 'Missing Paddle-Signature header', corsHeaders)
+    }
+
+    // 解析 ts=...;h1=...
+    const parts = {}
+    for (const p of signatureHeader.split(';')) {
+      const eqIdx = p.indexOf('=')
+      if (eqIdx > 0) parts[p.slice(0, eqIdx)] = p.slice(eqIdx + 1)
+    }
+    if (!parts.ts || !parts.h1) {
+      return errorResponse(401, 'Invalid Paddle-Signature format', corsHeaders)
+    }
+
+    // 防重放攻击：5 分钟窗口
+    const timestamp = parseInt(parts.ts, 10)
+    if (Math.abs(Math.floor(Date.now() / 1000) - timestamp) > 300) {
+      return errorResponse(401, 'Paddle signature timestamp expired', corsHeaders)
+    }
+
+    // Ed25519 签名验证
+    const secret = env.PADDLE_WEBHOOK_SECRET
+    if (!secret) {
+      return errorResponse(500, 'PADDLE_WEBHOOK_SECRET not configured', corsHeaders)
+    }
+
+    const signedContent = `${parts.ts}.${rawBody}`
+    const signatureBytes = base64Decode(parts.h1)
+    const publicKeyBytes = base64Decode(secret)
+
+    const publicKey = await crypto.subtle.importKey(
+      'raw', publicKeyBytes, { name: 'Ed25519' }, false, ['verify']
+    )
+
+    const isValid = await crypto.subtle.verify(
+      { name: 'Ed25519' }, publicKey, signatureBytes,
+      new TextEncoder().encode(signedContent)
+    )
+    if (!isValid) {
+      return errorResponse(401, 'Invalid Paddle webhook signature', corsHeaders)
+    }
+
+    // 3. 解析 payload
+    const payload = JSON.parse(rawBody)
+    const notification = payload.notification || payload
+    const eventType = notification.event_type
+    const data = notification.data || {}
+
+    console.log(`Paddle webhook received: ${eventType} (txn: ${data.id || 'unknown'})`)
+
+    // 4. 路由事件
+    switch (eventType) {
+      case 'transaction.completed':
+      case 'transaction.paid':
+        return await handleTransactionPaid(data, env, corsHeaders)
+      case 'transaction.cancelled':
+      case 'transaction.expired':
+      case 'transaction.voided':
+        console.log(`Paddle transaction ${eventType}: ${data.id}`)
+        return new Response(JSON.stringify({ received: true, event: eventType }), {
+          status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        })
+      default:
+        // 其他事件（如 subscription.*）记录日志但返回 200
+        console.log(`Paddle unhandled event type: ${eventType}`)
+        return new Response(JSON.stringify({ received: true, event: eventType }), {
+          status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        })
+    }
+  } catch (error) {
+    console.error('Paddle webhook error:', error.message, error.stack)
+    return errorResponse(500, `Paddle webhook internal error`, corsHeaders)
   }
-  return parseFloat(((inputTokens / 1000000) * pricing.input + (outputTokens / 1000000) * pricing.output).toFixed(4))
 }
 
-function generateRequestId() {
-  return 'req_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 9)
+// === 处理 transaction.completed/paid ===
+async function handleTransactionPaid(data, env, corsHeaders) {
+  const kv = env.LIFETOKEN_KV
+  if (!kv) return errorResponse(500, 'KV storage not configured', corsHeaders)
+
+  // 提取客户 email
+  const email = data.customer?.email
+  if (!email) {
+    console.error('Paddle: missing customer email in transaction data')
+    return new Response(JSON.stringify({ received: true, warning: 'Missing customer email' }), {
+      status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    })
+  }
+
+  // 通过 email 查找用户
+  const userKey = `user:${email.toLowerCase()}`
+  const userRaw = await kv.get(userKey)
+  if (!userRaw) {
+    console.error(`Paddle: user not found for email: ${email}`)
+    return new Response(JSON.stringify({ received: true, warning: 'User not found' }), {
+      status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    })
+  }
+  const userData = JSON.parse(userRaw)
+  const userId = userData.userId
+
+  // 提取金额（Paddle Billing API 金额单位为分）
+  let amountInCents = 0
+  const details = data.details
+  if (details?.line_items) {
+    for (const item of details.line_items) {
+      amountInCents += parseInt(item.total || '0', 10) + parseInt(item.tax || '0', 10)
+    }
+  } else if (data.amount) {
+    amountInCents = parseInt(String(data.amount), 10)
+  }
+
+  if (amountInCents <= 0) {
+    console.error(`Paddle: invalid amount (${amountInCents} cents) for txn ${data.id}`)
+    return new Response(JSON.stringify({ received: true, warning: 'Invalid amount' }), {
+      status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    })
+  }
+
+  // 货币单位转换
+  const currencyCode = (data.currency_code || 'USD').toUpperCase()
+  let amountInUnit = amountInCents / 100
+
+  // 非 CNY 货币按汇率换算
+  if (currencyCode !== 'CNY') {
+    const rate = await getExchangeRate()
+    const usdToCny = rate.cny || 7.2
+    if (currencyCode === 'USD') {
+      amountInUnit = parseFloat((amountInUnit * usdToCny).toFixed(4))
+    } else {
+      // 其他货币：先转 USD（近似），再转 CNY
+      const usdRate = rate[currencyCode.toLowerCase()] || 1
+      amountInUnit = parseFloat(((amountInUnit / usdRate) * usdToCny).toFixed(4))
+    }
+  }
+
+  // 写入余额
+  const balanceKey = `balance:${userId}`
+  const prevRaw = await kv.get(balanceKey)
+  const previousBalance = prevRaw ? parseFloat(prevRaw) : 0
+  const newBalance = parseFloat((previousBalance + amountInUnit).toFixed(6))
+  await kv.put(balanceKey, newBalance.toFixed(6))
+
+  // 记录交易流水
+  const txnKey = `paddle_txn:${data.id}`
+  await kv.put(txnKey, JSON.stringify({
+    transactionId: data.id,
+    userId,
+    email: email.toLowerCase(),
+    amount: amountInUnit,
+    currency: currencyCode,
+    originalCents: amountInCents,
+    previousBalance,
+    newBalance,
+    processedAt: new Date().toISOString(),
+    eventType: 'transaction.completed'
+  }))
+
+  console.log(`Paddle: credited ¥${amountInUnit} to user ${userId} (${email}), balance: ${previousBalance} → ${newBalance}`)
+
+  return new Response(JSON.stringify({
+    received: true,
+    event: 'transaction.completed',
+    userId,
+    credited: amountInUnit,
+    currency: 'CNY',
+    newBalance
+  }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
 }
 
-function errorResponse(status, message, corsHeaders) {
-  return new Response(JSON.stringify({ error: { message, type: 'api_error', code: status.toString() } }), {
-    status, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  })
+// === Base64 解码（返回 Uint8Array）===
+function base64Decode(str) {
+  const binStr = atob(str)
+  const bytes = new Uint8Array(binStr.length)
+  for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i)
+  return bytes
 }
