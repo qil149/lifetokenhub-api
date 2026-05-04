@@ -18,8 +18,8 @@ routes = [
 #   DEEPSEEK_API_KEY     — 必填，DeepSeek API Key（要有余额）
 #   ASCEND_API_KEY       — 可选，华为 Ascend API Key
 #   ADMIN_API_KEY        — 可选，后台管理 Key
-#   PADDLE_WEBHOOK_SECRET — 必填（使用 Paddle 支付时），Paddle Webhook Ed25519 公钥（base64 编码）
-#                         在 Paddle 后台 → Developer Tools → Webhooks 获取
+#   PADDLE_WEBHOOK_SECRET — 必填（使用 Paddle 支付时），Paddle Webhook 通知目标密钥（字符串，如 'pdl_ntfset_...'）
+#                         在 Paddle 后台 → Developer Tools → Notifications 获取
 #   ALLOWED_ORIGIN       — 可选，CORS 允许的域名，默认 *
 
 # --- KV 命名空间（可选，不配也能工作但不记账） ---

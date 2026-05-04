@@ -1,4 +1,4 @@
-// LifeTokenHub API Gateway - Cloudflare Worker v1.2 (ES Module)
+// LifeTokenHub API Gateway - Cloudflare Worker v2.0 (ES Module)
 // 双流量池架构：DeepSeek Primary Provider + Huawei Ascend Compute Provider
 // 支持：API转发 + 双供应商路由 + 敏感内容过滤 + 用户注册/登录 + 用量计费
 //
@@ -34,7 +34,7 @@ export default {
       return new Response(JSON.stringify({
         status: 'healthy',
         service: 'LifeTokenHub API Gateway',
-        version: '1.2',
+        version: '2.0',
         timestamp: new Date().toISOString(),
         providers: Object.keys(API_PROVIDERS),
         providerGroups: ['primary', 'ascend']
@@ -61,7 +61,7 @@ export default {
       default:
         return new Response(JSON.stringify({
           error: 'Not found',
-          available_endpoints: ['POST /v1/chat/completions', 'GET /v1/models', 'POST /v1/auth/verify', 'POST /v1/auth/register', 'POST /v1/auth/login', 'GET /v1/balance', 'POST /v1/admin/credits', 'GET /health']
+          available_endpoints: ['POST /v1/chat/completions', 'GET /v1/models', 'POST /v1/auth/verify', 'POST /v1/auth/register', 'POST /v1/auth/login', 'GET /v1/balance', 'POST /v1/admin/credits', 'POST /webhook/paddle', 'GET /health']
         }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
   }
@@ -483,25 +483,23 @@ async function handlePaddleWebhook(request, env, corsHeaders) {
       return errorResponse(401, 'Paddle signature timestamp expired', corsHeaders)
     }
 
-    // Ed25519 签名验证
+    // HMAC-SHA256 签名验证（Paddle Billing 使用 Secret Key）
     const secret = env.PADDLE_WEBHOOK_SECRET
     if (!secret) {
       return errorResponse(500, 'PADDLE_WEBHOOK_SECRET not configured', corsHeaders)
     }
 
-    const signedContent = `${parts.ts}.${rawBody}`
-    const signatureBytes = base64Decode(parts.h1)
-    const publicKeyBytes = base64Decode(secret)
-
-    const publicKey = await crypto.subtle.importKey(
-      'raw', publicKeyBytes, { name: 'Ed25519' }, false, ['verify']
+    const signedContent = `${parts.ts}:${rawBody}`
+    const encoder = new TextEncoder()
+    const keyData = await crypto.subtle.importKey(
+      'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
     )
+    const expectedSignature = await crypto.subtle.sign('HMAC', keyData, encoder.encode(signedContent))
+    const expectedHex = Array.from(new Uint8Array(expectedSignature))
+      .map(b => b.toString(16).padStart(2, '0')).join('')
 
-    const isValid = await crypto.subtle.verify(
-      { name: 'Ed25519' }, publicKey, signatureBytes,
-      new TextEncoder().encode(signedContent)
-    )
-    if (!isValid) {
+    if (parts.h1.length !== expectedHex.length ||
+        !constantTimeEqual(parts.h1, expectedHex)) {
       return errorResponse(401, 'Invalid Paddle webhook signature', corsHeaders)
     }
 
@@ -633,10 +631,12 @@ async function handleTransactionPaid(data, env, corsHeaders) {
   }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
 }
 
-// === Base64 解码（返回 Uint8Array）===
-function base64Decode(str) {
-  const binStr = atob(str)
-  const bytes = new Uint8Array(binStr.length)
-  for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i)
-  return bytes
+// 常量时间字符串比较（防时序攻击）
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length) return false
+  let mismatch = 0
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return mismatch === 0
 }
